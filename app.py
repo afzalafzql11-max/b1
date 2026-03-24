@@ -14,7 +14,6 @@ DB = "database.db"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DATASET, exist_ok=True)
 
-# FACE DETECTOR
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
@@ -48,7 +47,7 @@ def init_db():
 
 init_db()
 
-# ---------------- EMAIL (STATIC CONFIG) ----------------
+# ---------------- EMAIL ----------------
 EMAIL_USER = "missingchild@gmail.com"
 EMAIL_PASS = "zjjdphkumuppbjzd"
 
@@ -88,13 +87,7 @@ def extract_face(path):
     face = gray[y:y+h,x:x+w]
     return cv2.resize(face,(200,200))
 
-# ---------------- AGE PROGRESSION ----------------
-def age_progression(face):
-    blur = cv2.GaussianBlur(face,(7,7),0)
-    aged = cv2.addWeighted(face,0.6,blur,0.4,0)
-    return cv2.equalizeHist(aged)
-
-# ---------------- REVERSE AGE (YOUNGER) ----------------
+# ---------------- REVERSE AGE ----------------
 def reverse_age(face):
     smooth = cv2.bilateralFilter(face,9,75,75)
     bright = cv2.convertScaleAbs(smooth, alpha=1.2, beta=10)
@@ -102,7 +95,7 @@ def reverse_age(face):
 
 # ---------------- TRAIN ----------------
 def train_model():
-    recognizer = cv2.face.LBPHFaceRecognizer_create(radius=2, neighbors=8)
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
 
     faces, labels = [], []
 
@@ -119,10 +112,7 @@ def train_model():
         faces.append(img)
         labels.append(r[0])
 
-        # add variations
-        faces.append(age_progression(img))
-        labels.append(r[0])
-
+        # reverse age version
         faces.append(reverse_age(img))
         labels.append(r[0])
 
@@ -166,6 +156,63 @@ def login():
     else:
         return jsonify({"status":"fail"})
 
+# ---------------- REGISTER CHILD ----------------
+@app.route("/register_child", methods=["POST"])
+def register_child():
+    try:
+        name = request.form["name"]
+        age = request.form["age"]
+        place = request.form["place"]
+        photo = request.files["photo"]
+
+        path = os.path.join(DATASET, photo.filename)
+        photo.save(path)
+
+        face = extract_face(path)
+        if face is None:
+            return jsonify({"message":"No face detected"})
+
+        cv2.imwrite(path, face)
+
+        conn = sqlite3.connect(DB)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO children(name,age,place,image_path) VALUES(?,?,?,?)",
+            (name, age, place, path)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({"message":"Child registered"})
+
+    except Exception as e:
+        print(e)
+        return jsonify({"message":"Server error"})
+
+# ---------------- GET CHILDREN ----------------
+@app.route("/get_children")
+def get_children():
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT id,name,age,place FROM children")
+    rows = cur.fetchall()
+    conn.close()
+
+    return jsonify([
+        {"id":r[0],"name":r[1],"age":r[2],"place":r[3]}
+        for r in rows
+    ])
+
+# ---------------- DELETE ----------------
+@app.route("/delete_child/<int:id>", methods=["DELETE"])
+def delete_child(id):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM children WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"message":"Deleted"})
+
 # ---------------- CROSSCHECK ----------------
 @app.route("/crosscheck",methods=["POST"])
 def crosscheck():
@@ -183,24 +230,62 @@ def crosscheck():
     if model is None:
         return jsonify({"status":"no data"})
 
+    # NORMAL CHECK
     label, conf = model.predict(face)
 
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("SELECT name,age,place FROM children WHERE id=?",(label,))
-    row = cur.fetchone()
-    conn.close()
-
     if conf < 65:
+        conn = sqlite3.connect(DB)
+        cur = conn.cursor()
+        cur.execute("SELECT name,age,place FROM children WHERE id=?",(label,))
+        row = cur.fetchone()
+        conn.close()
+
         if user_email:
             send_email_alert(row[0],row[1],row[2],user_email)
 
         return jsonify({
             "status":"found",
-            "confidence":float(conf),
+            "type":"normal",
             "name":row[0],
             "age":row[1],
             "place":row[2]
         })
-    else:
-        return jsonify({"status":"not found"})
+
+    # REVERSE AGE CHECK
+    rev_face = reverse_age(face)
+    label2, conf2 = model.predict(rev_face)
+
+    if conf2 < 75:
+        conn = sqlite3.connect(DB)
+        cur = conn.cursor()
+        cur.execute("SELECT name,age,place FROM children WHERE id=?",(label2,))
+        row = cur.fetchone()
+        conn.close()
+
+        if user_email:
+            send_email_alert(row[0],row[1],row[2],user_email)
+
+        return jsonify({
+            "status":"found",
+            "type":"reverse_age",
+            "name":row[0],
+            "age":row[1],
+            "place":row[2]
+        })
+
+    return jsonify({"status":"not found"})
+
+# ---------------- VIDEO ----------------
+@app.route("/detect_video",methods=["POST"])
+def detect_video():
+    return jsonify({"status":"not found"})
+
+# ---------------- ROOT ----------------
+@app.route("/")
+def home():
+    return "API Running"
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT",5000))
+    app.run(host="0.0.0.0", port=port)

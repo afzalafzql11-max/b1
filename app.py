@@ -49,8 +49,8 @@ def init_db():
 init_db()
 
 # ---------------- EMAIL (STATIC CONFIG) ----------------
-EMAIL_USER = "yourgmail@gmail.com"
-EMAIL_PASS = "yourapppassword"
+EMAIL_USER = "missingchild@gmail.com"
+EMAIL_PASS = "zjjdphkumuppbjzd"
 
 def send_email_alert(name, age, place, receiver):
     msg = MIMEText(f"""

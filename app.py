@@ -23,24 +23,18 @@ def init_db():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users(
+    cur.execute("""CREATE TABLE IF NOT EXISTS users(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         email TEXT,
-        password TEXT
-    )
-    """)
+        password TEXT)""")
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS children(
+    cur.execute("""CREATE TABLE IF NOT EXISTS children(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         age INTEGER,
         place TEXT,
-        image_path TEXT
-    )
-    """)
+        image_path TEXT)""")
 
     conn.commit()
     conn.close()
@@ -52,7 +46,8 @@ EMAIL_USER = "missingchild@gmail.com"
 EMAIL_PASS = "zjjdphkumuppbjzd"
 
 def send_email_alert(name, age, place, receiver):
-    msg = MIMEText(f"""
+    try:
+        msg = MIMEText(f"""
 MATCH FOUND!
 
 Name: {name}
@@ -60,28 +55,30 @@ Age: {age}
 Place: {place}
 """)
 
-    msg["Subject"] = "Missing Child Found"
-    msg["From"] = EMAIL_USER
-    msg["To"] = receiver
+        msg["Subject"] = "Missing Child Found"
+        msg["From"] = EMAIL_USER
+        msg["To"] = receiver
 
-    try:
         server = smtplib.SMTP("smtp.gmail.com",587)
         server.starttls()
         server.login(EMAIL_USER,EMAIL_PASS)
         server.send_message(msg)
         server.quit()
+
     except Exception as e:
-        print("Email failed:", e)
+        print("Email error:", e)
 
 # ---------------- FACE ----------------
 def extract_face(path):
     img = cv2.imread(path)
-    if img is None: return None
+    if img is None:
+        return None
 
     gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray,1.3,5)
 
-    if len(faces)==0: return None
+    if len(faces)==0:
+        return None
 
     x,y,w,h = faces[0]
     face = gray[y:y+h,x:x+w]
@@ -95,7 +92,11 @@ def reverse_age(face):
 
 # ---------------- TRAIN ----------------
 def train_model():
-    recognizer = cv2.face.LBPHFaceRecognizer_create()
+    try:
+        recognizer = cv2.face.LBPHFaceRecognizer_create()
+    except:
+        print("ERROR: Install opencv-contrib-python")
+        return None
 
     faces, labels = [], []
 
@@ -107,12 +108,12 @@ def train_model():
 
     for r in rows:
         img = cv2.imread(r[1],0)
-        if img is None: continue
+        if img is None:
+            continue
 
         faces.append(img)
         labels.append(r[0])
 
-        # reverse age version
         faces.append(reverse_age(img))
         labels.append(r[0])
 
@@ -153,19 +154,25 @@ def login():
 
     if user:
         return jsonify({"status":"user","email":user[2]})
-    else:
-        return jsonify({"status":"fail"})
+    return jsonify({"status":"fail"})
 
 # ---------------- REGISTER CHILD ----------------
 @app.route("/register_child", methods=["POST"])
 def register_child():
     try:
-        name = request.form["name"]
-        age = request.form["age"]
-        place = request.form["place"]
-        photo = request.files["photo"]
+        if "photo" not in request.files:
+            return jsonify({"message":"No file uploaded"})
 
-        path = os.path.join(DATASET, photo.filename)
+        photo = request.files["photo"]
+        if photo.filename == "":
+            return jsonify({"message":"No selected file"})
+
+        name = request.form.get("name")
+        age = request.form.get("age")
+        place = request.form.get("place")
+
+        filename = photo.filename.replace(" ","_")
+        path = os.path.join(DATASET, filename)
         photo.save(path)
 
         face = extract_face(path)
@@ -176,109 +183,80 @@ def register_child():
 
         conn = sqlite3.connect(DB)
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO children(name,age,place,image_path) VALUES(?,?,?,?)",
-            (name, age, place, path)
-        )
+        cur.execute("INSERT INTO children(name,age,place,image_path) VALUES(?,?,?,?)",
+                    (name, age, place, path))
         conn.commit()
         conn.close()
 
         return jsonify({"message":"Child registered"})
 
     except Exception as e:
-        print(e)
+        print("REGISTER ERROR:", e)
         return jsonify({"message":"Server error"})
-
-# ---------------- GET CHILDREN ----------------
-@app.route("/get_children")
-def get_children():
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("SELECT id,name,age,place FROM children")
-    rows = cur.fetchall()
-    conn.close()
-
-    return jsonify([
-        {"id":r[0],"name":r[1],"age":r[2],"place":r[3]}
-        for r in rows
-    ])
-
-# ---------------- DELETE ----------------
-@app.route("/delete_child/<int:id>", methods=["DELETE"])
-def delete_child(id):
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM children WHERE id=?", (id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"message":"Deleted"})
 
 # ---------------- CROSSCHECK ----------------
 @app.route("/crosscheck",methods=["POST"])
 def crosscheck():
-    photo = request.files["photo"]
-    user_email = request.form.get("user_email")
+    try:
+        if "photo" not in request.files:
+            return jsonify({"status":"no file"})
 
-    path = os.path.join(UPLOAD_FOLDER,photo.filename)
-    photo.save(path)
+        photo = request.files["photo"]
 
-    face = extract_face(path)
-    if face is None:
-        return jsonify({"status":"no face"})
+        filename = photo.filename.replace(" ","_")
+        path = os.path.join(UPLOAD_FOLDER, filename)
+        photo.save(path)
 
-    model = train_model()
-    if model is None:
-        return jsonify({"status":"no data"})
+        face = extract_face(path)
+        if face is None:
+            return jsonify({"status":"no face"})
 
-    # NORMAL CHECK
-    label, conf = model.predict(face)
+        model = train_model()
+        if model is None:
+            return jsonify({"status":"no data"})
 
-    if conf < 65:
-        conn = sqlite3.connect(DB)
-        cur = conn.cursor()
-        cur.execute("SELECT name,age,place FROM children WHERE id=?",(label,))
-        row = cur.fetchone()
-        conn.close()
+        # NORMAL
+        label, conf = model.predict(face)
 
-        if user_email:
-            send_email_alert(row[0],row[1],row[2],user_email)
+        if conf < 65:
+            conn = sqlite3.connect(DB)
+            cur = conn.cursor()
+            cur.execute("SELECT name,age,place FROM children WHERE id=?",(label,))
+            row = cur.fetchone()
+            conn.close()
 
-        return jsonify({
-            "status":"found",
-            "type":"normal",
-            "name":row[0],
-            "age":row[1],
-            "place":row[2]
-        })
+            return jsonify({
+                "status":"found",
+                "type":"normal",
+                "name":row[0],
+                "age":row[1],
+                "place":row[2]
+            })
 
-    # REVERSE AGE CHECK
-    rev_face = reverse_age(face)
-    label2, conf2 = model.predict(rev_face)
+        # REVERSE AGE
+        rev_face = reverse_age(face)
+        label2, conf2 = model.predict(rev_face)
 
-    if conf2 < 75:
-        conn = sqlite3.connect(DB)
-        cur = conn.cursor()
-        cur.execute("SELECT name,age,place FROM children WHERE id=?",(label2,))
-        row = cur.fetchone()
-        conn.close()
+        if conf2 < 75:
+            conn = sqlite3.connect(DB)
+            cur = conn.cursor()
+            cur.execute("SELECT name,age,place FROM children WHERE id=?",(label2,))
+            row = cur.fetchone()
+            conn.close()
 
-        if user_email:
-            send_email_alert(row[0],row[1],row[2],user_email)
+            return jsonify({
+                "status":"found",
+                "type":"reverse_age",
+                "name":row[0],
+                "age":row[1],
+                "place":row[2]
+            })
 
-        return jsonify({
-            "status":"found",
-            "type":"reverse_age",
-            "name":row[0],
-            "age":row[1],
-            "place":row[2]
-        })
+        return jsonify({"status":"not found"})
 
-    return jsonify({"status":"not found"})
-
-# ---------------- VIDEO ----------------
-@app.route("/detect_video",methods=["POST"])
-def detect_video():
-    return jsonify({"status":"not found"})
+    except Exception as e:
+        print("CROSSCHECK ERROR:", e)
+        return jsonify({"status":"error"})
 
 # ---------------- ROOT ----------------
 @app.route("/")

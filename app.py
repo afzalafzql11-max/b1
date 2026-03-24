@@ -42,8 +42,8 @@ def init_db():
 init_db()
 
 # ---------------- EMAIL ----------------
-EMAIL_USER = "missingchild@gmail.com"
-EMAIL_PASS = "zjjdphkumuppbjzd"
+EMAIL_USER = os.environ.get("EMAIL_USER")
+EMAIL_PASS = os.environ.get("EMAIL_PASS")
 
 def send_email_alert(name, age, place, receiver):
     try:
@@ -164,15 +164,12 @@ def register_child():
             return jsonify({"message":"No file uploaded"})
 
         photo = request.files["photo"]
-        if photo.filename == "":
-            return jsonify({"message":"No selected file"})
 
         name = request.form.get("name")
         age = request.form.get("age")
         place = request.form.get("place")
 
-        filename = photo.filename.replace(" ","_")
-        path = os.path.join(DATASET, filename)
+        path = os.path.join(DATASET, photo.filename)
         photo.save(path)
 
         face = extract_face(path)
@@ -194,6 +191,33 @@ def register_child():
         print("REGISTER ERROR:", e)
         return jsonify({"message":"Server error"})
 
+# ---------------- GET CHILDREN ----------------
+@app.route("/get_children", methods=["GET"])
+def get_children():
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+
+    cur.execute("SELECT id,name,age,place FROM children")
+    rows = cur.fetchall()
+    conn.close()
+
+    return jsonify([
+        {"id":r[0], "name":r[1], "age":r[2], "place":r[3]}
+        for r in rows
+    ])
+
+# ---------------- DELETE CHILD ----------------
+@app.route("/delete_child/<int:id>", methods=["DELETE"])
+def delete_child(id):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM children WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"message":"Deleted"})
+
 # ---------------- CROSSCHECK ----------------
 @app.route("/crosscheck",methods=["POST"])
 def crosscheck():
@@ -202,9 +226,7 @@ def crosscheck():
             return jsonify({"status":"no file"})
 
         photo = request.files["photo"]
-
-        filename = photo.filename.replace(" ","_")
-        path = os.path.join(UPLOAD_FOLDER, filename)
+        path = os.path.join(UPLOAD_FOLDER, photo.filename)
         photo.save(path)
 
         face = extract_face(path)
@@ -215,7 +237,6 @@ def crosscheck():
         if model is None:
             return jsonify({"status":"no data"})
 
-        # NORMAL
         label, conf = model.predict(face)
 
         if conf < 65:
@@ -227,29 +248,10 @@ def crosscheck():
 
             return jsonify({
                 "status":"found",
-                "type":"normal",
                 "name":row[0],
                 "age":row[1],
-                "place":row[2]
-            })
-
-        # REVERSE AGE
-        rev_face = reverse_age(face)
-        label2, conf2 = model.predict(rev_face)
-
-        if conf2 < 75:
-            conn = sqlite3.connect(DB)
-            cur = conn.cursor()
-            cur.execute("SELECT name,age,place FROM children WHERE id=?",(label2,))
-            row = cur.fetchone()
-            conn.close()
-
-            return jsonify({
-                "status":"found",
-                "type":"reverse_age",
-                "name":row[0],
-                "age":row[1],
-                "place":row[2]
+                "place":row[2],
+                "confidence": float(conf)
             })
 
         return jsonify({"status":"not found"})
@@ -265,5 +267,4 @@ def home():
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))

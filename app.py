@@ -9,14 +9,12 @@ CORS(app)
 
 UPLOAD_FOLDER = "uploads"
 DATASET = "dataset"
-VIDEO_FOLDER = "videos"
-
 DB = "database.db"
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DATASET, exist_ok=True)
-os.makedirs(VIDEO_FOLDER, exist_ok=True)
 
+# ---------------- FACE ----------------
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
@@ -32,7 +30,8 @@ def init_db():
         name TEXT,
         email TEXT,
         password TEXT
-    )""")
+    )
+    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS children(
@@ -41,7 +40,8 @@ def init_db():
         age INTEGER,
         place TEXT,
         image_path TEXT
-    )""")
+    )
+    """)
 
     conn.commit()
     conn.close()
@@ -49,10 +49,10 @@ def init_db():
 init_db()
 
 # ---------------- EMAIL ----------------
-def send_email_alert(name, age, place):
-    sender = "your_email@gmail.com"
-    password = "your_app_password"
-    receiver = "receiver_email@gmail.com"
+def send_email_alert(name, age, place, receiver):
+
+    sender = os.environ.get("EMAIL_USER")
+    password = os.environ.get("EMAIL_PASS")
 
     msg = MIMEText(f"""
 MATCH FOUND!
@@ -63,6 +63,8 @@ Place: {place}
 """)
 
     msg["Subject"] = "Missing Child Found"
+    msg["From"] = sender
+    msg["To"] = receiver
 
     try:
         server = smtplib.SMTP("smtp.gmail.com",587)
@@ -70,14 +72,19 @@ Place: {place}
         server.login(sender,password)
         server.send_message(msg)
         server.quit()
-    except:
-        print("Email failed")
+    except Exception as e:
+        print("Email failed:", e)
 
-# ---------------- FACE ----------------
-def extract_face(img):
+# ---------------- FACE EXTRACT ----------------
+def extract_face(path):
+    img = cv2.imread(path)
+    if img is None: return None
+
     gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray,1.3,5)
+
     if len(faces)==0: return None
+
     x,y,w,h = faces[0]
     face = gray[y:y+h,x:x+w]
     return cv2.resize(face,(200,200))
@@ -85,11 +92,12 @@ def extract_face(img):
 # ---------------- AGE PROGRESSION ----------------
 def age_progression(face):
     blur = cv2.GaussianBlur(face,(5,5),0)
-    sharpen = cv2.addWeighted(face,1.5,blur,-0.5,0)
-    return cv2.equalizeHist(sharpen)
+    sharp = cv2.addWeighted(face,1.5,blur,-0.5,0)
+    return cv2.equalizeHist(sharp)
 
 # ---------------- TRAIN ----------------
 def train_model(use_aged=False):
+
     recognizer = cv2.face.LBPHFaceRecognizer_create()
     faces, labels = [], []
 
@@ -107,7 +115,8 @@ def train_model(use_aged=False):
         labels.append(r[0])
 
         if use_aged:
-            faces.append(age_progression(img))
+            aged = age_progression(img)
+            faces.append(aged)
             labels.append(r[0])
 
     if len(faces)==0: return None
@@ -115,12 +124,28 @@ def train_model(use_aged=False):
     recognizer.train(faces,np.array(labels))
     return recognizer
 
+# ---------------- SIGNUP ----------------
+@app.route("/signup",methods=["POST"])
+def signup():
+    data = request.json
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO users(name,email,password) VALUES(?,?,?)",
+                (data["name"],data["email"],data["password"]))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"message":"Account created"})
+
 # ---------------- LOGIN ----------------
 @app.route("/login",methods=["POST"])
 def login():
+
     data = request.json
 
-    if data["email"]=="missing child" and data["password"]=="ths345$":
+    # ADMIN LOGIN
+    if data["email"] == "missing child" and data["password"] == "ths345$":
         return jsonify({"status":"admin"})
 
     conn = sqlite3.connect(DB)
@@ -130,23 +155,15 @@ def login():
     user = cur.fetchone()
     conn.close()
 
-    return jsonify({"status":"user" if user else "fail"})
-
-# ---------------- SIGNUP ----------------
-@app.route("/signup",methods=["POST"])
-def signup():
-    data = request.json
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO users(name,email,password) VALUES(?,?,?)",
-                (data["name"],data["email"],data["password"]))
-    conn.commit()
-    conn.close()
-    return jsonify({"message":"Account created"})
+    if user:
+        return jsonify({"status":"user","email":user[2]})
+    else:
+        return jsonify({"status":"fail"})
 
 # ---------------- REGISTER CHILD ----------------
 @app.route("/register_child",methods=["POST"])
 def register_child():
+
     name = request.form["name"]
     age = request.form["age"]
     place = request.form["place"]
@@ -155,9 +172,7 @@ def register_child():
     path = os.path.join(DATASET,photo.filename)
     photo.save(path)
 
-    img = cv2.imread(path)
-    face = extract_face(img)
-
+    face = extract_face(path)
     if face is None:
         return jsonify({"message":"No face detected"})
 
@@ -175,33 +190,51 @@ def register_child():
 # ---------------- GET CHILDREN ----------------
 @app.route("/get_children")
 def get_children():
+
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT id,name,age,place FROM children")
     rows = cur.fetchall()
     conn.close()
 
-    return jsonify([
-        {"id":r[0],"name":r[1],"age":r[2],"place":r[3]}
-        for r in rows
-    ])
+    return jsonify([{
+        "id":r[0],
+        "name":r[1],
+        "age":r[2],
+        "place":r[3]
+    } for r in rows])
 
 # ---------------- DELETE ----------------
 @app.route("/delete_child/<int:id>",methods=["DELETE"])
 def delete_child(id):
+
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("DELETE FROM children WHERE id=?", (id,))
     conn.commit()
     conn.close()
+
     return jsonify({"message":"Deleted"})
 
-# ---------------- IMAGE MATCH ----------------
-def match_face(face):
+# ---------------- IMAGE CROSSCHECK ----------------
+@app.route("/crosscheck",methods=["POST"])
+def crosscheck():
+
+    photo = request.files["photo"]
+    user_email = request.form.get("user_email")
+
+    path = os.path.join(UPLOAD_FOLDER,photo.filename)
+    photo.save(path)
+
+    face = extract_face(path)
+    if face is None:
+        return jsonify({"status":"no face"})
+
     model = train_model(False)
     aged_model = train_model(True)
 
-    if model is None: return None
+    if model is None:
+        return jsonify({"status":"database empty"})
 
     label,conf = model.predict(face)
     label2,conf2 = aged_model.predict(face)
@@ -213,52 +246,47 @@ def match_face(face):
     conn.close()
 
     if conf < 60:
-        send_email_alert(row[0],row[1],row[2])
-        return {"type":"normal","data":row}
+        if user_email:
+            send_email_alert(row[0],row[1],row[2],user_email)
 
-    elif conf2 < 75:
-        send_email_alert(row[0],row[1],row[2])
-        return {"type":"age","data":row}
-
-    return None
-
-# ---------------- CROSSCHECK IMAGE ----------------
-@app.route("/crosscheck",methods=["POST"])
-def crosscheck():
-    file = request.files["photo"]
-    path = os.path.join(UPLOAD_FOLDER,file.filename)
-    file.save(path)
-
-    img = cv2.imread(path)
-    face = extract_face(img)
-
-    if face is None:
-        return jsonify({"status":"no face"})
-
-    result = match_face(face)
-
-    if result:
         return jsonify({
             "status":"found",
-            "match_type":result["type"],
-            "name":result["data"][0],
-            "age":result["data"][1],
-            "place":result["data"][2]
+            "match_type":"normal",
+            "name":row[0],
+            "age":row[1],
+            "place":row[2]
         })
 
-    return jsonify({"status":"not found"})
+    elif conf2 < 75:
+        if user_email:
+            send_email_alert(row[0],row[1],row[2],user_email)
 
-# ---------------- VIDEO (CCTV SIMULATION) ----------------
+        return jsonify({
+            "status":"found",
+            "match_type":"age_progression",
+            "name":row[0],
+            "age":row[1],
+            "place":row[2]
+        })
+
+    else:
+        return jsonify({"status":"not found"})
+
+# ---------------- VIDEO DETECTION ----------------
 @app.route("/detect_video",methods=["POST"])
 def detect_video():
 
-    file = request.files["video"]
-    path = os.path.join(VIDEO_FOLDER,file.filename)
-    file.save(path)
+    video = request.files["video"]
+    path = os.path.join(UPLOAD_FOLDER,video.filename)
+    video.save(path)
 
     cap = cv2.VideoCapture(path)
+    model = train_model()
 
-    found_results = []
+    if model is None:
+        return jsonify({"status":"no data"})
+
+    results = []
 
     frame_count = 0
 
@@ -269,31 +297,41 @@ def detect_video():
 
         frame_count += 1
 
-        # process every 10th frame
+        # skip frames (for speed)
         if frame_count % 10 != 0:
             continue
 
-        face = extract_face(frame)
-        if face is None:
-            continue
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray,1.3,5)
 
-        result = match_face(face)
+        for (x,y,w,h) in faces:
+            face = gray[y:y+h,x:x+w]
+            face = cv2.resize(face,(200,200))
 
-        if result:
-            found_results.append({
-                "name":result["data"][0],
-                "age":result["data"][1],
-                "place":result["data"][2],
-                "type":result["type"]
-            })
+            label, conf = model.predict(face)
+
+            if conf < 60:
+                conn = sqlite3.connect(DB)
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM children WHERE id=?",(label,))
+                row = cur.fetchone()
+                conn.close()
+
+                results.append(row[0])
 
     cap.release()
 
-    if len(found_results) > 0:
-        return jsonify({"status":"found","results":found_results})
+    if len(results) > 0:
+        return jsonify({"status":"found","results":results})
+    else:
+        return jsonify({"status":"not found"})
 
-    return jsonify({"status":"not found"})
+# ---------------- ROOT ----------------
+@app.route("/")
+def home():
+    return "Missing Child Detection API Running"
 
 # ---------------- RUN ----------------
-if __name__=="__main__":
-    app.run(debug=True)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT",5000))
+    app.run(host="0.0.0.0", port=port)
